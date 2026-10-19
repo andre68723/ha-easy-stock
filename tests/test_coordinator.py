@@ -2,6 +2,7 @@
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
+import aiohttp
 import pytest
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
@@ -14,6 +15,7 @@ from .conftest import (
     make_trading_period,
     make_yahoo_payload,
     make_store,
+    make_hourly_payload,
     mock_http,
 )
 
@@ -21,6 +23,12 @@ from .conftest import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _bars_today(price=1.0):
+    """One intraday bar on today's date — what a day with trading actually looks like."""
+    noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    return make_hourly_payload([(noon, price)])
 
 
 def _coord(hass, history=None):
@@ -40,7 +48,7 @@ async def test_first_call_uses_backfill_url(hass):
     with patcher:
         await coord._async_update_data()
 
-    called_url = mock_session.get.call_args[0][0]
+    called_url = mock_session.get.call_args_list[0][0][0]
     assert called_url == YAHOO_CHART_URL.format(symbol=SYMBOL)
 
 
@@ -53,7 +61,7 @@ async def test_subsequent_call_uses_mini_url(hass):
     with patcher:
         await coord._async_update_data()
 
-    called_url = mock_session.get.call_args[0][0]
+    called_url = mock_session.get.call_args_list[0][0][0]
     assert called_url == YAHOO_CHART_URL_MINI.format(symbol=SYMBOL)
 
 
@@ -71,7 +79,7 @@ async def test_migration_triggers_backfill(hass):
     with patcher:
         await coord._async_update_data()
 
-    called_url = mock_session.get.call_args[0][0]
+    called_url = mock_session.get.call_args_list[0][0][0]
     assert called_url == YAHOO_CHART_URL.format(symbol=SYMBOL)
 
 
@@ -192,12 +200,16 @@ async def test_price_is_live_when_last_date_is_today(hass):
 
 
 async def test_price_is_live_when_meta_differs_from_last_close(hass):
-    """No trading windows → fall back to the heuristic: meta_price moved → live."""
+    """No trading windows → price_is_live falls back to "did it trade today"."""
+    await hass.config.async_set_time_zone("UTC")
     coord = _coord(hass)
     last_close = SAMPLE_DAYS[-1][1]
     meta = round(last_close * 1.005, 4)  # 0.5% above close
 
-    patcher, _ = mock_http(make_yahoo_payload(meta_price=meta, trading_period=None))
+    patcher, _ = mock_http(
+        make_yahoo_payload(meta_price=meta, trading_period=None),
+        hourly_payload=_bars_today(meta),
+    )
 
     with patcher:
         result = await coord._async_update_data()
@@ -238,11 +250,13 @@ async def test_market_state_derived_when_yahoo_omits_it(hass):
 
 async def test_market_state_closed_after_the_session_ended(hass):
     """Session over but still the same UTC day (Tokyo case) → CLOSED, price not live."""
+    await hass.config.async_set_time_zone("UTC")
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     days = SAMPLE_DAYS[:-1] + [(today_str, 195.00)]
     coord = _coord(hass)
     patcher, _ = mock_http(
-        make_yahoo_payload(days_prices=days, trading_period=make_trading_period(open_now=False))
+        make_yahoo_payload(days_prices=days, trading_period=make_trading_period(open_now=False)),
+        hourly_payload=_bars_today(195.00),
     )
 
     with patcher:
@@ -254,11 +268,13 @@ async def test_market_state_closed_after_the_session_ended(hass):
 
 async def test_traded_today_stays_true_after_the_session_ended(hass):
     """The card needs "did it trade today" — that stays true once the market shuts."""
+    await hass.config.async_set_time_zone("UTC")
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     days = SAMPLE_DAYS[:-1] + [(today_str, 195.00)]
     coord = _coord(hass)
     patcher, _ = mock_http(
-        make_yahoo_payload(days_prices=days, trading_period=make_trading_period(open_now=False))
+        make_yahoo_payload(days_prices=days, trading_period=make_trading_period(open_now=False)),
+        hourly_payload=_bars_today(195.00),
     )
 
     with patcher:
@@ -451,7 +467,10 @@ async def test_a_stock_has_traded_today_while_its_session_is_running(hass, freez
             days_prices=days,
             meta_price=101.0,
             trading_period=make_trading_period(open_now=True),
-        )
+        ),
+        hourly_payload=make_hourly_payload(
+            [(datetime(2024, 5, 31, 12, 0, tzinfo=timezone.utc), 101.0)]
+        ),
     )
 
     with patcher:
@@ -510,7 +529,10 @@ async def test_a_running_session_counts_before_yahoo_writes_todays_candle(hass, 
             meta_price=102.0,
             market_time=int(datetime(2026, 9, 8, 9, 10, tzinfo=timezone.utc).timestamp()),
             trading_period=make_trading_period(open_now=True),
-        )
+        ),
+        hourly_payload=make_hourly_payload(
+            [(datetime(2026, 9, 8, 8, 0, tzinfo=timezone.utc), 102.0)]
+        ),
     )
 
     with patcher:
@@ -521,8 +543,12 @@ async def test_a_running_session_counts_before_yahoo_writes_todays_candle(hass, 
     assert data["previous_close"] == pytest.approx(101.0)
 
 
-async def test_without_a_last_trade_timestamp_the_price_heuristic_still_applies(hass, freezer):
-    """Yahoo has dropped fields before; the old rule stays as the fallback."""
+async def test_the_price_heuristic_is_the_last_resort(hass, freezer):
+    """With no intraday series and no last-trade stamp, the oldest rule decides.
+
+    Yahoo has dropped fields before, and the intraday request can fail, so the
+    chain still ends somewhere rather than reporting "did not trade".
+    """
     await hass.config.async_set_time_zone("Europe/Berlin")
     freezer.move_to("2026-09-08T09:15:00+00:00")
 
@@ -532,10 +558,118 @@ async def test_without_a_last_trade_timestamp_the_price_heuristic_still_applies(
             days_prices=[("2026-09-04", 100.0), ("2026-09-07", 101.0)],
             meta_price=102.0,
             trading_period=make_trading_period(open_now=True),
-        )
+        ),
+        hourly_raises=aiohttp.ClientError("no intraday"),
     )
 
     with patcher:
         data = await coord._async_update_data()
 
     assert data["traded_today"] is True
+
+
+# ---------------------------------------------------------------------------
+# traded_today from intraday bars (measured weekend 17./18.10.2026)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refreshed_fx_quote_on_a_sunday_is_not_a_trade(hass, freezer):
+    """Yahoo refreshes the FX quote over the weekend while the bars stay stale.
+
+    Measured on Sunday 18.10.2026 at 22:34 Berlin: `regularMarketTime` jumped to
+    a stamp 14 minutes old and the price moved, while the newest hourly bar was
+    still the previous Friday and `currentTradingPeriod` still described the
+    Friday session. Reading the quote — its price or its timestamp — calls that a
+    trading day. The bars do not.
+    """
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    freezer.move_to("2026-10-18T20:34:00+00:00")  # Sun 22:34 Berlin
+
+    days = [("2026-10-15", 0.82775), ("2026-10-16", 0.82361)]  # last session: Friday
+    friday_bar = datetime(2026, 10, 16, 20, 0, tzinfo=timezone.utc)
+
+    coord = _coord(hass, history=None)
+    patcher, _ = mock_http(
+        make_yahoo_payload(
+            days_prices=days,
+            meta_price=0.8253,  # refreshed quote
+            market_time=int(datetime(2026, 10, 18, 20, 20, tzinfo=timezone.utc).timestamp()),
+            trading_period=make_trading_period(open_now=False),
+        ),
+        hourly_payload=make_hourly_payload([(friday_bar, 0.82361)]),
+    )
+
+    with patcher:
+        data = await coord._async_update_data()
+
+    assert data["traded_today"] is False
+
+
+async def test_placeholder_bars_over_a_weekend_are_not_a_trade(hass, freezer):
+    """Yahoo emits null-close bars on Saturdays; they must not count."""
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    freezer.move_to("2026-10-17T07:05:00+00:00")  # Sat 09:05 Berlin
+
+    saturday = datetime(2026, 10, 17, 8, 0, tzinfo=timezone.utc)
+    coord = _coord(hass, history=None)
+    patcher, _ = mock_http(
+        make_yahoo_payload(
+            days_prices=[("2026-10-15", 0.82775), ("2026-10-16", 0.82361)],
+            meta_price=0.8236,
+            market_time=int(datetime(2026, 10, 16, 20, 59, tzinfo=timezone.utc).timestamp()),
+            trading_period=make_trading_period(open_now=False),
+        ),
+        hourly_payload=make_hourly_payload([(saturday, None)]),
+    )
+
+    with patcher:
+        data = await coord._async_update_data()
+
+    assert data["traded_today"] is False
+
+
+async def test_a_bar_today_counts_as_traded(hass, freezer):
+    """The ordinary weekday case must keep working."""
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    freezer.move_to("2026-10-19T13:00:00+00:00")  # Mon 15:00 Berlin
+
+    coord = _coord(hass, history=None)
+    patcher, _ = mock_http(
+        make_yahoo_payload(
+            days_prices=[("2026-10-16", 100.0), ("2026-10-19", 101.0)],
+            meta_price=101.5,
+            market_time=int(datetime(2026, 10, 19, 12, 55, tzinfo=timezone.utc).timestamp()),
+            trading_period=make_trading_period(open_now=True),
+        ),
+        hourly_payload=make_hourly_payload(
+            [(datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc), 101.5)]
+        ),
+    )
+
+    with patcher:
+        data = await coord._async_update_data()
+
+    assert data["traded_today"] is True
+
+
+async def test_a_failing_intraday_request_falls_back_to_the_old_rule(hass, freezer):
+    """A flaky second request must not make the sensor worse than before."""
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    freezer.move_to("2026-10-19T13:00:00+00:00")
+
+    coord = _coord(hass, history=None)
+    patcher, _ = mock_http(
+        make_yahoo_payload(
+            days_prices=[("2026-10-16", 100.0), ("2026-10-19", 101.0)],
+            meta_price=101.5,
+            market_time=int(datetime(2026, 10, 19, 12, 55, tzinfo=timezone.utc).timestamp()),
+            trading_period=make_trading_period(open_now=True),
+        ),
+        hourly_raises=aiohttp.ClientError("boom"),
+    )
+
+    with patcher:
+        data = await coord._async_update_data()
+
+    assert data["traded_today"] is True
+    assert data["current_price"] == pytest.approx(101.5)
