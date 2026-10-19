@@ -86,6 +86,22 @@ def make_yahoo_payload(days_prices=None, meta_price=None, trading_period=_DEFAUL
     }
 
 
+def make_hourly_payload(bars):
+    """Build an hourly chart response from (datetime, close) pairs; close None = placeholder."""
+    return {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"symbol": SYMBOL},
+                    "timestamp": [int(dt.timestamp()) for dt, _ in bars],
+                    "indicators": {"quote": [{"close": [c for _, c in bars]}]},
+                }
+            ],
+            "error": None,
+        }
+    }
+
+
 def make_store(history=None):
     """Return a mocked Store with optional pre-loaded history."""
     store = AsyncMock()
@@ -93,17 +109,39 @@ def make_store(history=None):
     return store
 
 
-def mock_http(payload, status=200):
-    """Return a context manager that patches aiohttp.ClientSession."""
-    mock_resp = AsyncMock()
-    mock_resp.status = status
-    mock_resp.json = AsyncMock(return_value=payload)
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
+def _response(payload, status=200):
+    resp = AsyncMock()
+    resp.status = status
+    resp.json = AsyncMock(return_value=payload)
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+    return resp
+
+
+def mock_http(payload, status=200, hourly_payload=None, hourly_raises=None):
+    """Patch aiohttp.ClientSession.
+
+    The coordinator makes two calls per update: the daily series and the hourly
+    one it reads "did this trade today" from. Pass `hourly_payload` to answer the
+    `interval=1h` request differently, or `hourly_raises` to make it fail.
+    """
+    daily = _response(payload, status)
+    # Default: an empty intraday series, so a test that needs "it traded today"
+    # has to say so instead of inheriting the daily candles by accident.
+    hourly = _response(
+        hourly_payload if hourly_payload is not None else make_hourly_payload([]), status
+    )
+
+    def _get(url, *args, **kwargs):
+        if "interval=1h" in url:
+            if hourly_raises is not None:
+                raise hourly_raises
+            return hourly
+        return daily
 
     mock_session = MagicMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
-    mock_session.get.return_value = mock_resp
+    mock_session.get.side_effect = _get
 
     return patch("aiohttp.ClientSession", MagicMock(return_value=mock_session)), mock_session
