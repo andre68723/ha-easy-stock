@@ -148,3 +148,42 @@ def test_last_trade_date_is_none_when_yahoo_ships_no_timestamp():
 
 def test_last_trade_date_is_none_when_the_timestamp_is_unusable():
     assert last_trade_date({"regularMarketTime": "nonsense"}, ZoneInfo("Europe/Berlin")) is None
+
+
+# ---------------------------------------------------------------------------
+# The weekend quote refresh also fooled the session state (#17)
+# ---------------------------------------------------------------------------
+
+
+def test_a_refreshed_quote_on_a_resting_weekend_is_not_a_session():
+    """Yahoo refreshed the FX quote on Sunday evening while nothing traded.
+
+    The continuous-window rule only asks how old the last tick is, so a stamp
+    fourteen minutes old read as a running session two and a half hours before
+    the market opened. The intraday bars know better.
+    """
+    now = 1792354900
+    meta = _meta(regular=(now - 86400, now + 60), regularMarketTime=now - 840)
+    assert derive_market_state(meta, now=now) == "REGULAR"  # what it used to say
+    assert derive_market_state(meta, now=now, traded_today=False) == "CLOSED"
+
+
+def test_a_continuously_traded_asset_with_bars_today_stays_open():
+    now = 1792354900
+    meta = _meta(regular=(now - 86400, now + 60), regularMarketTime=now - 60)
+    assert derive_market_state(meta, now=now, traded_today=True) == "REGULAR"
+
+
+def test_without_an_intraday_answer_the_staleness_rule_still_decides():
+    now = 1792354900
+    fresh = _meta(regular=(now - 86400, now + 60), regularMarketTime=now - 60)
+    stale = _meta(regular=(now - 86400, now + 60), regularMarketTime=now - 99999)
+    assert derive_market_state(fresh, now=now, traded_today=None) == "REGULAR"
+    assert derive_market_state(stale, now=now, traded_today=None) == "CLOSED"
+
+
+def test_an_exchange_with_real_opening_hours_is_left_to_its_windows():
+    """Only the 24-hour case is overridden; a windowed exchange keeps its own hours."""
+    now = 1792354900
+    meta = _meta(regular=(now - 3600, now + 3600))
+    assert derive_market_state(meta, now=now, traded_today=False) == "REGULAR"

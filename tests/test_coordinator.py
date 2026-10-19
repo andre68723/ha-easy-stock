@@ -673,3 +673,41 @@ async def test_a_failing_intraday_request_falls_back_to_the_old_rule(hass, freez
 
     assert data["traded_today"] is True
     assert data["current_price"] == pytest.approx(101.5)
+
+
+async def test_a_resting_fx_pair_is_closed_even_with_a_fresh_quote(hass, freezer):
+    """The session state must not believe the weekend quote refresh either.
+
+    FX carries a 24-hour window like crypto, so only the age of the last tick
+    separated "open" from "resting" — and that tick was refreshed on Sunday
+    evening while nothing traded.
+    """
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    freezer.move_to("2026-10-18T20:34:00+00:00")  # Sun 22:34 Berlin
+
+    now = int(datetime(2026, 10, 18, 20, 34, tzinfo=timezone.utc).timestamp())
+    continuous = {
+        "pre": {"start": now - 86400, "end": now - 86400},
+        "regular": {"start": now - 86400, "end": now + 60},
+        "post": {"start": now + 60, "end": now + 60},
+    }
+
+    coord = _coord(hass, history=None)
+    patcher, _ = mock_http(
+        make_yahoo_payload(
+            days_prices=[("2026-10-15", 0.82775), ("2026-10-16", 0.82361)],
+            meta_price=0.8253,
+            market_time=now - 840,  # refreshed fourteen minutes ago
+            trading_period=continuous,
+        ),
+        hourly_payload=make_hourly_payload(
+            [(datetime(2026, 10, 16, 20, 0, tzinfo=timezone.utc), 0.82361)]
+        ),
+    )
+
+    with patcher:
+        data = await coord._async_update_data()
+
+    assert data["traded_today"] is False
+    assert data["market_state"] == "CLOSED"
+    assert data["price_is_live"] is False
