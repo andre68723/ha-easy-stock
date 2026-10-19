@@ -198,7 +198,7 @@ class StockDataCoordinator(DataUpdateCoordinator):
             # to report Tokyo as live all through the European afternoon. Only
             # when Yahoo ships no trading windows at all does the date-based
             # heuristic stand in for it.
-            state = derive_market_state(meta)
+            state = derive_market_state(meta, traded_today=intraday_today)
             price_is_live = traded_today if state is None else state == "REGULAR"
 
             change = current_price - previous_close

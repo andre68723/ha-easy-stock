@@ -31,7 +31,9 @@ def _bounds(period: dict, name: str) -> tuple[int, int] | None:
     return start, end
 
 
-def derive_market_state(meta: dict, now: int | None = None) -> str | None:
+def derive_market_state(
+    meta: dict, now: int | None = None, traded_today: bool | None = None
+) -> str | None:
     """Return "REGULAR", "PRE", "POST" or "CLOSED" for the given chart meta.
 
     Returns None when Yahoo ships neither an explicit state nor usable trading
@@ -59,6 +61,12 @@ def derive_market_state(meta: dict, now: int | None = None) -> str | None:
 
     regular = windows.get("regular")
     if regular and regular[1] - regular[0] >= _CONTINUOUS_SPAN:
+        # Yahoo refreshes the quote for FX pairs during the weekend while the
+        # candles stand still, so a stamp minutes old is not proof of a session.
+        # When the intraday bars say nothing traded today, they win; `None` means
+        # the caller could not find out and the staleness rule stands alone.
+        if traded_today is False:
+            return "CLOSED"
         last_tick = meta.get("regularMarketTime")
         if not isinstance(last_tick, int) or now - last_tick <= _CONTINUOUS_STALE_AFTER:
             return "REGULAR"
@@ -87,7 +95,13 @@ def last_trade_date(meta: dict, tzinfo) -> str | None:
     runs on for hours. The two sat 1.06 % apart all weekend, so the card drew a
     rising line for an asset that had not traded since Friday.
 
-    ``regularMarketTime`` answers the question directly instead of inferring it.
+    ``regularMarketTime`` answers that better than the price comparison did, but
+    not well enough: for FX pairs Yahoo refreshes this stamp during the weekend
+    while the candles stand still, so it reads as a trade when none happened.
+    What the two figures above actually show is only that a daily bar is not the
+    day's last trade -- for a future the exchange settlement is the likely
+    reason, though Yahoo's response does not say so. See ./intraday for the
+    signal that replaced both.
     """
     ts = meta.get("regularMarketTime")
     if not isinstance(ts, int) or isinstance(ts, bool) or ts <= 0:
