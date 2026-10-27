@@ -711,3 +711,39 @@ async def test_a_resting_fx_pair_is_closed_even_with_a_fresh_quote(hass, freezer
     assert data["traded_today"] is False
     assert data["market_state"] == "CLOSED"
     assert data["price_is_live"] is False
+
+
+async def test_a_saturday_candle_does_not_outvote_the_missing_bars(hass, freezer):
+    """Yahoo stamps a daily candle with Saturday's date while nothing trades.
+
+    Captured 24.10.2026 at 09:09 Berlin for `CHF=X`, the hour @AnAnalogGuy's
+    screenshot was taken: `regularMarketTime` carried Saturday 06:21, and the
+    daily series had grown a candle whose epoch equals that very timestamp, so
+    its UTC date is Saturday. That makes *both* older signals say "traded
+    today" — the last-trade stamp and the `last_date == today_str` branch. The
+    intraday bars were the only ones that knew better: the newest one with a
+    price was the previous Friday at 21:00 UTC.
+
+    This guards the order of those branches: the bars have to win.
+    """
+    await hass.config.async_set_time_zone("Europe/Berlin")
+    freezer.move_to("2026-10-24T07:09:00+00:00")  # Sat 09:09 Berlin
+
+    saturday_stamp = int(datetime(2026, 10, 24, 4, 21, tzinfo=timezone.utc).timestamp())
+    coord = _coord(hass, history=None)
+    patcher, _ = mock_http(
+        make_yahoo_payload(
+            days_prices=[("2026-10-22", 0.8198), ("2026-10-24", 0.8241)],  # last one is today
+            meta_price=0.8241,
+            market_time=saturday_stamp,
+            trading_period=make_trading_period(open_now=False),
+        ),
+        hourly_payload=make_hourly_payload(
+            [(datetime(2026, 10, 23, 21, 0, tzinfo=timezone.utc), 0.8241)]  # Friday only
+        ),
+    )
+
+    with patcher:
+        data = await coord._async_update_data()
+
+    assert data["traded_today"] is False
