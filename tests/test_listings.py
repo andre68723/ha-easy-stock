@@ -174,11 +174,22 @@ async def test_chart_stats_propagates_a_timeout():
         await listings.chart_stats("VGWL.DE")
 
 
-async def test_partial_failure_does_not_silently_remove_the_home_listing():
+async def test_a_failed_request_drops_only_that_listing():
     async def stats(symbol):
         if symbol == "VGWL.DE":
-            raise aiohttp.ClientError("503")
-        return listings.ChartStats(250, FRESH, "GBP", "London")
+            raise aiohttp.ClientError("429")
+        return listings.ChartStats(*_VWRL_CHARTS[symbol])
+
+    with patch.object(listings, "chart_stats", side_effect=stats):
+        result = await listings.vet_listings(_VWRL, "EUR", "DE")
+
+    # The three that answered stay, in the usual order: euro lines before pounds.
+    assert [r["symbol"] for r in result] == ["VWRL.AS", "VWRL.MI", "VWRL.L"]
+
+
+async def test_every_request_failing_is_an_outage():
+    async def stats(symbol):
+        raise aiohttp.ClientError("503")
 
     with patch.object(listings, "chart_stats", side_effect=stats), pytest.raises(aiohttp.ClientError):
         await listings.vet_listings(_VWRL, "EUR", "DE")

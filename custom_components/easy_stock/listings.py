@@ -89,20 +89,21 @@ async def vet_listings(
 
     Each kept listing gains a "currency". Listings in the user's currency lead, and
     within those the ones on the home exchange of their country; `currency` and
-    `country` are Home Assistant's own settings. A failed request must not silently
-    remove a listing or turn an outage into a "not found" result.
+    `country` are Home Assistant's own settings. A listing whose request failed (Yahoo
+    answers bursts with the odd 429) is dropped; only when every request failed is it
+    an outage, which raises instead of passing for a "not found" result.
     """
     stats = await asyncio.gather(
         *(chart_stats(c["symbol"]) for c in candidates), return_exceptions=True
     )
-    for st in stats:
-        if isinstance(st, BaseException):
-            raise st
+    failures = [st for st in stats if isinstance(st, BaseException)]
+    if failures and len(failures) == len(stats):
+        raise failures[0]
     now = time.time()
     kept = [
         {**c, "currency": st.currency, "exchange": st.exchange or c["exchange"]}
         for c, st in zip(candidates, stats)
-        if st is not None and st.closes >= MIN_POINTS and now - st.last_trade <= MAX_QUOTE_AGE
+        if st is not None and not isinstance(st, BaseException) and st.closes >= MIN_POINTS and now - st.last_trade <= MAX_QUOTE_AGE
     ]
 
     home = HOME_SUFFIX.get(country or "")
