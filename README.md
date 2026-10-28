@@ -112,8 +112,8 @@ include the console line from step 2 and the `easy_stock.frontend` log lines fro
 
 | Field | Description |
 |---|---|
-| **Symbol** | Yahoo Finance ticker (see examples below) |
-| **Name** | Display name shown in the card (optional — falls back to the symbol if left empty) |
+| **Symbol** | Yahoo Finance ticker (see examples below) an ISIN such as `DE0007164600`, or a WKN such as `A1JX52` |
+| **Name** | Display name shown in the card and for the entry (optional — left empty, a new entry takes Yahoo's name for the asset, e.g. `Vanguard FTSE All-World UCITS ETF`, or the symbol if Yahoo has none). The entity id always comes from the symbol, e.g. `sensor.vgwl_de` |
 | **Update interval** | How often to poll Yahoo Finance in seconds (60–86400, default 900) |
 
 Repeat for each asset you want to track. Each asset becomes its own sensor entity.
@@ -134,6 +134,8 @@ Use the search on [finance.yahoo.com](https://finance.yahoo.com) to find the exa
 | Ethereum / USD | `ETH-USD` |
 | Gold (1 oz) ETC | `4GLD.DE` |
 | S&P 500 ETF | `SPY` |
+
+**Using an ISIN or WKN instead:** enter the 12-character ISIN (or the six-character WKN) in the symbol field and Easy Stock looks up where it trades, through [OpenFIGI](https://www.openfigi.com), and checks each listing against Yahoo Finance. If it trades on several exchanges you pick the listing in a second step: the listings in your Home Assistant currency and on your country's home exchange come first (for a German setup XETRA in EUR, for a UK one London in GBP), and the first one is preselected. Listings Yahoo has no usable history for (a single day of data, or no trade for weeks) are left out. If OpenFIGI does not answer, an ISIN falls back to Yahoo's own search; an input that no lookup resolves is taken as a Yahoo symbol, and the form refuses it if Yahoo does not know that symbol either, instead of creating an entry that never gets a price. The ISIN or WKN you type is sent to OpenFIGI (Bloomberg's free identifier service) for the lookup, and nothing else is. Only the resolved ticker is stored, so the currency and exchange follow the listing you chose.
 
 > **Tip:** For European ETFs the exchange suffix matters — `.DE` (Frankfurt), `.AS` (Amsterdam), `.MI` (Milan), `.VI` (Vienna), etc.
 
